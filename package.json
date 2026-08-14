@@ -1,0 +1,16 @@
+{
+  "name": "drop-talk",
+  "version": "1.0.0",
+  "description": "drop-talk",
+  "main": "src/server.js",
+  "scripts": {
+    "start": "node src/server.js"
+  },
+  "dependencies": {
+    "express": "^4.19.2",
+    "node-cron": "^3.0.3",
+    "node-fetch": "^3.3.2",
+    "socket.io": "^4.7.5",
+    "sqlite3": "^6.0.1"
+  }
+}
