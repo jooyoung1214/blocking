@@ -8,7 +8,7 @@ const { Server } = require('socket.io');
 const cron = require('node-cron');
 
 const db = require('./db');
-const boardLib = require('./board');
+const boardLib = require('../public/shared/board');
 const rules = require('../public/shared/rules');
 
 const {
@@ -66,7 +66,7 @@ function ensureCurrentSeason({ announce = false } = {}) {
     if (announce) {
         io.emit('season_changed', {
             season: state.season,
-            board: state.board,
+            blocks: state.blocks.map(publicBlock),
             boardRows: state.boardRows,
             archive: state.archive,
             message: '새로운 시즌이 시작되어 보드가 초기화되었습니다!'
@@ -119,7 +119,7 @@ function remainingDrops(userId) {
 io.on('connection', (socket) => {
     const rawUserId = socket.handshake.auth && socket.handshake.auth.userId;
     if (typeof rawUserId !== 'string' || rawUserId.length === 0 || rawUserId.length > 100) {
-        socket.emit('error_message', '유저 식별에 실패했습니다. 페이지를 새로고침 해주세요.');
+        socket.emit('error_message', { code: 'NO_USER_ID' });
         socket.disconnect(true);
         return;
     }
@@ -132,7 +132,7 @@ io.on('connection', (socket) => {
 
     socket.emit('init_state', {
         season: state.season,
-        board: state.board,
+        blocks: state.blocks.map(publicBlock),
         boardRows: state.boardRows,
         cols: BOARD_COLS,
         maxCells: MAX_CELLS,
@@ -175,14 +175,14 @@ io.on('connection', (socket) => {
             handleDrop(socket, userId, payload);
         } catch (err) {
             console.error('[drop_block]', err);
-            socket.emit('error_message', '드롭 처리 중 오류가 발생했습니다.');
+            socket.emit('error_message', { code: 'INTERNAL' });
         }
     });
 
     // 결제 기능은 아직 미완성이다. 구멍이 뚫린 채로 남겨두지 않기 위해
     // 경로 자체를 막아둔다. (Task: 결제 시스템에서 다시 구현)
     socket.on('request_payment', () => {
-        socket.emit('error_message', '결제 기능은 아직 준비 중입니다.');
+        socket.emit('error_message', { code: 'PAYMENT_DISABLED' });
     });
 
     socket.on('disconnect', () => {});
@@ -193,44 +193,37 @@ function handleDrop(socket, userId, payload) {
     ensureCurrentSeason({ announce: true });
 
     if (!payload || typeof payload !== 'object') {
-        return socket.emit('error_message', '유효하지 않은 요청입니다.');
+        return socket.emit('error_message', { code: 'BAD_CELL' });
     }
 
     const norm = rules.normalizeShape(payload.shape);
     if (!norm.ok) {
-        const messages = {
-            EMPTY: '블록을 최소 1칸 이상 그려주세요.',
-            TOO_MANY_CELLS: `블록은 최대 ${MAX_CELLS}칸까지만 만들 수 있습니다.`,
-            DISCONNECTED: '블록이 끊어져 있습니다. 상하좌우로 이어지게 그려주세요.',
-            BAD_CELL: '블록 데이터가 올바르지 않습니다.',
-            OUT_OF_RANGE: '블록 좌표가 올바르지 않습니다.'
-        };
-        return socket.emit('error_message', messages[norm.reason] || '블록이 유효하지 않습니다.');
+        return socket.emit('error_message', { code: norm.reason, params: { max: MAX_CELLS } });
     }
     const shape = norm.shape;
 
     if (!rules.isValidColor(payload.color)) {
-        return socket.emit('error_message', '유효하지 않은 색상입니다.');
+        return socket.emit('error_message', { code: 'INVALID_COLOR' });
     }
 
     const width = boardLib.blockWidth(shape);
     const x = Number(payload.x);
     if (!Number.isInteger(x) || x < 0 || x + width > BOARD_COLS) {
-        return socket.emit(
-            'error_message',
-            `드롭 위치가 보드를 벗어납니다. (0~${BOARD_COLS - width})`
-        );
+        return socket.emit('error_message', {
+            code: 'OUT_OF_BOUNDS',
+            params: { max: BOARD_COLS - width }
+        });
     }
 
     if (remainingDrops(userId) <= 0) {
-        return socket.emit('error_message', '드롭 기회를 모두 사용했습니다.');
+        return socket.emit('error_message', { code: 'NO_DROPS_LEFT' });
     }
 
     // 착지 위치를 서버가 확정한다. 경쟁 상태가 여기서 소멸한다.
     const grid = boardLib.buildOccupancy(state.blocks, state.boardRows, BOARD_COLS);
     const landingY = boardLib.computeLandingY(grid, shape, x, state.boardRows, BOARD_COLS);
     if (landingY === null) {
-        return socket.emit('error_message', '이 위치에는 블록을 놓을 수 없습니다.');
+        return socket.emit('error_message', { code: 'CANT_PLACE' });
     }
 
     const now = Date.now();
@@ -301,13 +294,15 @@ function handleDrop(socket, userId, payload) {
     });
 
     io.emit('toast_message', {
-        text: `🚀 [${block.nickname}]님이 블록을 남겼습니다.`
+        code: 'BLOCK_LANDED',
+        params: { nickname: block.nickname, row: block.y }
     });
 
     if (result.clearedBlocks.length > 0) {
         const names = Array.from(new Set(result.clearedBlocks.map(b => b.nickname)));
         io.emit('toast_message', {
-            text: `✨ ${result.fullRows.length}개 행 완성! ${names.length}명의 메시지가 수확되었습니다.`
+            code: 'ROWS_CLEARED',
+            params: { rows: result.fullRows.length, people: names.length }
         });
     }
 }

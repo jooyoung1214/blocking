@@ -1,6 +1,6 @@
 'use strict';
 const assert = require('assert');
-const B = require('./src/board');
+const B = require('./public/shared/board');
 const rules = require('./public/shared/rules');
 
 let pass = 0;
