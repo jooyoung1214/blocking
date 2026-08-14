@@ -1,4 +1,18 @@
-const socket = io();
+// ── 유저 식별: 새로고침/재접속에도 유지되는 영구 토큰 ──────────────────
+function getOrCreateUserId() {
+    const KEY = 'droptalk_user_id';
+    let id = localStorage.getItem(KEY);
+    if (!id) {
+        id = (window.crypto && crypto.randomUUID)
+            ? crypto.randomUUID()
+            : 'u_' + Date.now().toString(36) + '_' + Math.random().toString(36).slice(2);
+        localStorage.setItem(KEY, id);
+    }
+    return id;
+}
+
+const USER_ID = getOrCreateUserId();
+const socket = io({ auth: { userId: USER_ID } });
 
 const canvas = document.getElementById('gameCanvas');
 const ctx = canvas.getContext('2d');
@@ -17,6 +31,10 @@ let isUserScrolling = false;
 let initialScrolled = false;
 let isPaidExpansionVerified = false;
 
+// ── 렌더링 최적화: 상태가 실제로 바뀌었을 때만 다시 그림 ──────────────
+let renderDirty = true;
+function markDirty() { renderDirty = true; }
+
 // 토스트 메시지 생성 함수
 function showToast(text) {
     const containerEl = document.getElementById('toast-container');
@@ -34,6 +52,10 @@ socket.on('toast_message', (data) => {
     showToast(data.text);
 });
 
+socket.on('connect_error', (err) => {
+    console.error('Connection error:', err.message);
+});
+
 // 닉네임 입력 이벤트 바인딩
 const nicknameInput = document.getElementById('nicknameInput');
 nicknameInput.addEventListener('input', (e) => {
@@ -43,7 +65,10 @@ nicknameInput.addEventListener('input', (e) => {
 container.addEventListener('scroll', () => {
     const isAtBottom = container.scrollHeight - container.scrollTop - container.clientHeight < 50;
     isUserScrolling = !isAtBottom;
+    markDirty();
 });
+
+window.addEventListener('resize', markDirty);
 
 const editorContainer = document.getElementById('shape-editor');
 const EDITOR_COLS = 5;
@@ -85,19 +110,27 @@ function getActiveCellCount() {
     return count;
 }
 
+// 서버와 동일한 규칙(영문/숫자 1글자, 대문자화)으로 정제
+function sanitizeCellTextInput(raw) {
+    const match = String(raw).slice(0, 1).match(/[A-Za-z0-9]/);
+    return match ? match[0].toUpperCase() : '';
+}
+
 function renderEditor() {
     editorContainer.innerHTML = '';
     for (let r = 0; r < EDITOR_ROWS; r++) {
         for (let c = 0; c < EDITOR_COLS; c++) {
             const cellDiv = document.createElement('div');
             cellDiv.className = `editor-cell ${editorGrid[r][c] ? 'active' : ''}`;
-            
+
             if (editorGrid[r][c]) {
                 const textInput = document.createElement('input');
                 textInput.maxLength = 1;
                 textInput.value = editorTexts[r][c];
                 textInput.addEventListener('input', (e) => {
-                    editorTexts[r][c] = e.target.value.toUpperCase();
+                    const cleaned = sanitizeCellTextInput(e.target.value);
+                    e.target.value = cleaned;
+                    editorTexts[r][c] = cleaned;
                 });
                 cellDiv.appendChild(textInput);
             }
@@ -133,7 +166,7 @@ function renderArchive() {
         const card = document.createElement('div');
         card.className = 'harvested-card';
         card.style.borderLeftColor = item.color;
-        
+
         const header = document.createElement('div');
         header.className = 'harvested-header';
         header.innerHTML = `<span>Extracted Data</span><span>${item.timestamp}</span>`;
@@ -157,7 +190,7 @@ function renderArchive() {
             let y = cell.dy * miniSize;
             mCtx.fillStyle = item.color;
             mCtx.fillRect(x, y, miniSize, miniSize);
-            
+
             mCtx.fillStyle = 'rgba(255,255,255,0.1)';
             mCtx.fillRect(x, y, miniSize, miniSize / 2);
 
@@ -183,12 +216,17 @@ socket.on('init_state', (data) => {
     fallingBlocks = data.fallingBlocks;
     harvestedMessages = data.harvestedMessages || [];
     renderArchive();
-    if (data.hasDropped) lockDropButtonForExtraPay();
+    if (data.hasDropped) {
+        lockDropButtonForExtraPay();
+    } else {
+        unlockDropButton();
+    }
     if (!initialScrolled) {
         container.scrollTop = container.scrollHeight;
         initialScrolled = true;
     }
     socket.emit('set_nickname', nicknameInput.value);
+    markDirty();
 });
 
 socket.on('monthly_reset', (data) => {
@@ -202,10 +240,15 @@ socket.on('monthly_reset', (data) => {
     isPaidExpansionVerified = false;
     renderArchive();
     container.scrollTop = container.scrollHeight;
+    markDirty();
 });
 
 socket.on('drop_success', (data) => {
-    if (data.hasDropped) lockDropButtonForExtraPay();
+    if (data.hasDropped) {
+        lockDropButtonForExtraPay();
+    } else {
+        unlockDropButton();
+    }
     isPaidExpansionVerified = false;
 });
 
@@ -224,7 +267,12 @@ socket.on('payment_success', (data) => {
 });
 
 socket.on('error_message', (msg) => { alert(msg); });
-socket.on('new_block_spawned', (block) => { fallingBlocks.push(block); });
+
+socket.on('new_block_spawned', (block) => {
+    fallingBlocks.push(block);
+    markDirty();
+});
+
 socket.on('update_falling_blocks', (data) => {
     fallingBlocks = data.fallingBlocks;
     if (ROWS !== data.boardRows) {
@@ -232,7 +280,9 @@ socket.on('update_falling_blocks', (data) => {
         canvas.height = ROWS * CELL_SIZE;
     }
     if (!isUserScrolling) container.scrollTop = container.scrollHeight;
+    markDirty();
 });
+
 socket.on('board_updated', (data) => {
     board = data.board;
     ROWS = data.boardRows;
@@ -241,6 +291,7 @@ socket.on('board_updated', (data) => {
     harvestedMessages = data.harvestedMessages || [];
     renderArchive();
     if (!isUserScrolling) container.scrollTop = container.scrollHeight;
+    markDirty();
 });
 
 function lockDropButtonForExtraPay() {
@@ -260,7 +311,7 @@ function unlockDropButton() {
 function drawCell(ctx, x, y, size, color, text) {
     ctx.fillStyle = color;
     ctx.fillRect(x, y, size, size);
-    
+
     ctx.fillStyle = 'rgba(255, 255, 255, 0.15)';
     ctx.fillRect(x, y, size, size / 2);
 
@@ -271,43 +322,73 @@ function drawCell(ctx, x, y, size, color, text) {
         ctx.textBaseline = 'middle';
         ctx.fillText(text, x + size / 2, y + size / 2 + 1);
     }
-    
+
     ctx.strokeStyle = 'rgba(0, 0, 0, 0.4)';
     ctx.strokeRect(x, y, size, size);
 }
 
-function render() {
+// ── 뷰포트 기반 부분 렌더링 ──────────────────────────────────────────
+// 보드가 세로로 무한정 늘어나므로, 매 프레임 전체 보드를 다시 그리지 않고
+// 현재 스크롤 위치에서 실제로 보이는 행(+버퍼)만 그린다.
+// 또한 상태가 바뀌지 않았으면(renderDirty === false) 아예 다시 그리지 않는다.
+function drawFrame() {
+    const bufferRows = 4;
+    const viewTop = container.scrollTop;
+    const viewBottom = viewTop + container.clientHeight;
+
+    const startRow = Math.max(0, Math.floor(viewTop / CELL_SIZE) - bufferRows);
+    const endRow = Math.min(ROWS, Math.ceil(viewBottom / CELL_SIZE) + bufferRows);
+
+    const clearY = startRow * CELL_SIZE;
+    const clearHeight = (endRow - startRow) * CELL_SIZE;
+
+    if (clearHeight <= 0) return;
+
     ctx.fillStyle = '#12141a';
-    ctx.fillRect(0, 0, canvas.width, canvas.height);
-    
+    ctx.fillRect(0, clearY, canvas.width, clearHeight);
+
     ctx.strokeStyle = '#1f2833';
     ctx.lineWidth = 1;
-    for(let c = 0; c <= COLS; c++) {
-        ctx.beginPath(); ctx.moveTo(c * CELL_SIZE, 0); ctx.lineTo(c * CELL_SIZE, canvas.height); ctx.stroke();
+    for (let c = 0; c <= COLS; c++) {
+        ctx.beginPath();
+        ctx.moveTo(c * CELL_SIZE, clearY);
+        ctx.lineTo(c * CELL_SIZE, clearY + clearHeight);
+        ctx.stroke();
     }
-    for(let r = 0; r <= ROWS; r++) {
-        ctx.beginPath(); ctx.moveTo(0, r * CELL_SIZE); ctx.lineTo(canvas.width, r * CELL_SIZE); ctx.stroke();
+    for (let r = startRow; r <= endRow; r++) {
+        ctx.beginPath();
+        ctx.moveTo(0, r * CELL_SIZE);
+        ctx.lineTo(canvas.width, r * CELL_SIZE);
+        ctx.stroke();
     }
 
-    for (let r = 0; r < ROWS; r++) {
+    for (let r = startRow; r < endRow; r++) {
         if (!board[r]) continue;
         for (let c = 0; c < COLS; c++) {
             if (board[r][c] !== null) {
-                const x = c * CELL_SIZE;
-                const y = r * CELL_SIZE;
-                drawCell(ctx, x, y, CELL_SIZE, board[r][c].color, board[r][c].text);
+                drawCell(ctx, c * CELL_SIZE, r * CELL_SIZE, CELL_SIZE, board[r][c].color, board[r][c].text);
             }
         }
     }
-    
+
     fallingBlocks.forEach(fb => {
         fb.shape.forEach(cell => {
-            let x = (fb.startX + cell.dx) * CELL_SIZE;
-            let y = (fb.y + cell.dy) * CELL_SIZE;
+            const cellRow = fb.y + cell.dy;
+            if (cellRow < startRow || cellRow >= endRow) return;
+            const x = (fb.startX + cell.dx) * CELL_SIZE;
+            const y = cellRow * CELL_SIZE;
             drawCell(ctx, x, y, CELL_SIZE, fb.color, cell.text);
         });
     });
-    
+}
+
+function render() {
+    // 낙하 중인 블록이 있으면 계속 다시 그려야 하고(서버 tick마다 위치가 바뀜),
+    // 그 외에는 상태가 실제로 바뀐 프레임에만 그린다.
+    if (renderDirty || fallingBlocks.length > 0) {
+        renderDirty = false;
+        drawFrame();
+    }
     requestAnimationFrame(render);
 }
 render();
@@ -359,6 +440,13 @@ document.getElementById('dropBtn').addEventListener('click', () => {
         return;
     }
 
+    const startX = parseInt(document.getElementById('colInput').value);
+    const maxDx = Math.max(...shape.map(cell => cell.dx));
+    if (!Number.isInteger(startX) || startX < 0 || startX + maxDx >= COLS) {
+        alert(`드롭 위치가 보드를 벗어납니다. (0~${COLS - 1 - maxDx} 사이로 선택해주세요)`);
+        return;
+    }
+
     if (shapeCount > 10 && !isPaidExpansionVerified) {
         const extraCost = shapeCount - 10;
         if (confirm(`You selected ${shapeCount} cells (10 free + ${extraCost} extra).\nWould you like to pay $${extraCost} via Lemon Squeezy to drop this payload?`)) {
@@ -366,7 +454,7 @@ document.getElementById('dropBtn').addEventListener('click', () => {
         }
         return;
     }
-    
+
     triggerDropAction();
 });
 
